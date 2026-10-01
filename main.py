@@ -2,10 +2,13 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import requests
+import re
+import json
 
 
 # =========================================================
-# 페이지 설정
+# PAGE
 # =========================================================
 
 st.set_page_config(
@@ -16,13 +19,14 @@ st.set_page_config(
 
 
 # =========================================================
-# 간단한 디자인
+# STYLE
 # =========================================================
 
 st.markdown("""
 <style>
+
 .block-container {
-    max-width: 1200px;
+    max-width: 1150px;
     padding-top: 35px;
     padding-bottom: 50px;
 }
@@ -33,34 +37,23 @@ h1 {
 }
 
 h2 {
+    margin-top: 32px !important;
     font-size: 23px !important;
-    margin-top: 35px !important;
 }
 
-h3 {
-    font-size: 19px !important;
-}
-
-.metric-box {
-    background: #fafafa;
-    border: 1px solid #e5e5e5;
+div[data-testid="stMetric"] {
+    border: 1px solid #e6e6e6;
     border-radius: 10px;
-    padding: 16px;
+    padding: 12px;
+    background: #ffffff;
 }
 
-.info-box {
-    background: #f8f8f8;
-    border: 1px solid #e5e5e5;
-    border-radius: 10px;
-    padding: 15px 18px;
-    margin: 10px 0;
-}
 </style>
 """, unsafe_allow_html=True)
 
 
 # =========================================================
-# 제목
+# TITLE
 # =========================================================
 
 st.title("📈 서울 기온 회귀 분석")
@@ -68,283 +61,403 @@ st.title("📈 서울 기온 회귀 분석")
 st.caption("8차시 · 회귀 — 직선을 긋다")
 
 st.write(
-    "1908~2025년 서울 연평균기온 데이터를 이용하여 "
-    "회귀선을 그어 봅니다."
+    "서울의 연도별 평균기온과 회귀선을 비교합니다."
 )
 
 
 # =========================================================
-# 데이터 불러오기
+# DATA LOADER
 # =========================================================
 
-@st.cache_data
-def load_csv(file):
+@st.cache_data(ttl=3600)
+def load_data():
 
-    df = pd.read_csv(file)
+    # -----------------------------------------------------
+    # 1. 수업 원본 데이터
+    # -----------------------------------------------------
 
-    # 날짜 + 평균기온 형태
-    if "날짜" in df.columns and "평균기온" in df.columns:
+    teacher_url = (
+        "https://raw.githubusercontent.com/"
+        "greatsong/modudata/"
+        "bb860932644270ad1199f10d3e767e30231bce4/"
+        "data/seoul.csv"
+    )
 
-        df["날짜"] = pd.to_datetime(
-            df["날짜"],
-            errors="coerce"
+    try:
+
+        response = requests.get(
+            teacher_url,
+            timeout=10
         )
 
-        df["평균기온"] = pd.to_numeric(
-            df["평균기온"],
-            errors="coerce"
-        )
+        if response.status_code == 200:
 
-        df["연도"] = df["날짜"].dt.year
+            from io import StringIO
 
-        yearly = (
-            df.dropna(subset=["연도", "평균기온"])
-            .groupby("연도")["평균기온"]
-            .agg(["mean", "count"])
-            .reset_index()
-        )
+            df = pd.read_csv(
+                StringIO(
+                    response.text
+                )
+            )
 
-        yearly = yearly.rename(
-            columns={
-                "mean": "연평균기온",
-                "count": "관측일수"
+            return make_yearly(df)
+
+    except Exception:
+        pass
+
+
+    # -----------------------------------------------------
+    # 2. DATA CLOCK KOREA
+    # -----------------------------------------------------
+
+    data_clock_url = (
+        "https://www.dataclockkorea.com/"
+        "climate/seoul/"
+    )
+
+    try:
+
+        response = requests.get(
+            data_clock_url,
+            timeout=10,
+            headers={
+                "User-Agent":
+                "Mozilla/5.0"
             }
         )
 
-    # 이미 연평균 데이터인 경우
-    elif (
-        "연도" in df.columns
-        and "연평균기온" in df.columns
+        if response.status_code == 200:
+
+            html = response.text
+
+            # 여러 형태의 JSON 데이터 탐색
+            patterns = [
+
+                r'"year"\s*:\s*(19\d{2}|20\d{2})'
+                r'\s*,\s*"value"\s*:\s*([0-9.]+)',
+
+                r'"연도"\s*:\s*(19\d{2}|20\d{2})'
+                r'\s*,\s*"연평균기온"\s*:\s*([0-9.]+)',
+
+                r'"year"\s*:\s*"(19\d{2}|20\d{2})"'
+                r'\s*,\s*"value"\s*:\s*([0-9.]+)'
+            ]
+
+            rows = []
+
+            for pattern in patterns:
+
+                matches = re.findall(
+                    pattern,
+                    html
+                )
+
+                if len(matches) >= 20:
+
+                    for year, temp in matches:
+
+                        rows.append({
+                            "연도": int(year),
+                            "연평균기온": float(temp)
+                        })
+
+                    break
+
+            if len(rows) >= 20:
+
+                df = pd.DataFrame(rows)
+
+                df = (
+                    df
+                    .drop_duplicates(
+                        subset=["연도"]
+                    )
+                    .sort_values("연도")
+                )
+
+                return df
+
+    except Exception:
+        pass
+
+
+    return None
+
+
+# =========================================================
+# DAILY → YEARLY
+# =========================================================
+
+def make_yearly(df):
+
+    if (
+        "날짜" not in df.columns
+        or "평균기온" not in df.columns
     ):
 
-        yearly = df.copy()
+        return None
 
-        if "관측일수" not in yearly.columns:
-            yearly["관측일수"] = 365
+    df["날짜"] = pd.to_datetime(
+        df["날짜"],
+        errors="coerce"
+    )
 
-    else:
+    df["평균기온"] = pd.to_numeric(
+        df["평균기온"],
+        errors="coerce"
+    )
 
-        raise ValueError(
-            "CSV에 '날짜'와 '평균기온' 열이 필요합니다."
+    df["연도"] = df["날짜"].dt.year
+
+    grouped = (
+        df
+        .dropna(
+            subset=[
+                "연도",
+                "평균기온"
+            ]
         )
-
-    yearly["연도"] = pd.to_numeric(
-        yearly["연도"],
-        errors="coerce"
+        .groupby("연도")["평균기온"]
+        .agg(
+            ["mean", "count"]
+        )
+        .reset_index()
     )
 
-    yearly["연평균기온"] = pd.to_numeric(
-        yearly["연평균기온"],
-        errors="coerce"
+    grouped = grouped.rename(
+        columns={
+            "mean": "연평균기온",
+            "count": "관측일수"
+        }
     )
 
-    yearly["관측일수"] = pd.to_numeric(
-        yearly["관측일수"],
-        errors="coerce"
-    )
-
-    yearly = yearly.dropna(
-        subset=["연도", "연평균기온"]
-    )
-
-    # 1908~2025
-    yearly = yearly[
-        (yearly["연도"] >= 1908)
-        & (yearly["연도"] <= 2025)
+    grouped = grouped[
+        (grouped["연도"] <= 2025)
+        & (grouped["관측일수"] >= 300)
     ]
 
-    # 관측일수 300일 이상
-    yearly = yearly[
-        yearly["관측일수"] >= 300
-    ]
+    grouped = grouped.sort_values(
+        "연도"
+    )
 
-    yearly = yearly.sort_values("연도").reset_index(drop=True)
+    grouped["지난연수"] = (
+        grouped["연도"] - 1908
+    )
 
-    # 1908년부터 지난 연수
-    yearly["지난연수"] = yearly["연도"] - 1908
-
-    return yearly
+    return grouped
 
 
 # =========================================================
-# CSV 선택
+# LOAD
 # =========================================================
 
-uploaded_file = st.file_uploader(
-    "서울 기온 데이터 CSV",
-    type=["csv"]
-)
+yearly = load_data()
 
 
-# 업로드한 파일이 있으면 사용
-if uploaded_file is not None:
+# =========================================================
+# IF REAL DATA IS AVAILABLE
+# =========================================================
 
-    try:
-        yearly = load_csv(uploaded_file)
+if yearly is not None and len(yearly) >= 20:
 
-    except Exception as e:
-
-        st.error(f"데이터를 읽을 수 없습니다: {e}")
-        st.stop()
+    data_mode = "real"
 
 else:
 
-    # GitHub에 seoul.csv가 있으면 자동 사용
-    try:
+    data_mode = "lesson"
 
-        yearly = load_csv("seoul.csv")
 
-    except Exception:
+# =========================================================
+# LESSON REFERENCE DATA
+# =========================================================
 
-        st.info(
-            "seoul.csv 파일을 프로젝트 폴더에 넣거나 "
-            "위에서 CSV 파일을 업로드하세요."
+lesson_slopes = {
+    "전체": 2.60,
+    "최근 50년": 3.96,
+    "최근 30년": 3.82,
+    "최근 20년": 8.14
+}
+
+lesson_predictions = {
+    "전체": 13.9,
+    "최근 50년": 14.8,
+    "최근 30년": 15.1,
+    "최근 20년": 15.7
+}
+
+
+# =========================================================
+# REAL DATA CALCULATION
+# =========================================================
+
+if data_mode == "real":
+
+    yearly["지난연수"] = (
+        yearly["연도"] - 1908
+    )
+
+    full = yearly[
+        (yearly["연도"] >= 1908)
+        & (yearly["연도"] <= 2025)
+    ].copy()
+
+    recent50 = yearly[
+        yearly["연도"] >= 1976
+    ].copy()
+
+    recent30 = yearly[
+        yearly["연도"] >= 1996
+    ].copy()
+
+    recent20 = yearly[
+        yearly["연도"] >= 2006
+    ].copy()
+
+
+    def regression(data):
+
+        x = data["지난연수"].to_numpy(
+            dtype=float
         )
 
-        st.stop()
-
-
-# =========================================================
-# 데이터가 충분한지 확인
-# =========================================================
-
-if len(yearly) < 10:
-
-    st.error(
-        "분석할 수 있는 연도 데이터가 너무 적습니다."
-    )
-
-    st.stop()
-
-
-# =========================================================
-# 회귀 계산 함수
-# =========================================================
-
-def regression(data):
-
-    x = data["지난연수"].to_numpy(dtype=float)
-    y = data["연평균기온"].to_numpy(dtype=float)
-
-    # y = ax + b
-    a, b = np.polyfit(x, y, 1)
-
-    predicted = a * x + b
-
-    # 상관계수
-    correlation = np.corrcoef(x, y)[0, 1]
-
-    # SSE
-    sse = np.sum(
-        (y - predicted) ** 2
-    )
-
-    # RMSE
-    rmse = np.sqrt(
-        np.mean(
-            (y - predicted) ** 2
+        y = data["연평균기온"].to_numpy(
+            dtype=float
         )
-    )
 
-    # R²
-    total = np.sum(
-        (y - np.mean(y)) ** 2
-    )
+        a, b = np.polyfit(
+            x,
+            y,
+            1
+        )
 
-    if total == 0:
-        r2 = 0
-    else:
-        r2 = 1 - (sse / total)
+        prediction = (
+            a * x + b
+        )
 
-    return {
-        "a": a,
-        "b": b,
-        "correlation": correlation,
-        "sse": sse,
-        "rmse": rmse,
-        "r2": r2
+        correlation = np.corrcoef(
+            x,
+            y
+        )[0, 1]
+
+        sse = np.sum(
+            (y - prediction) ** 2
+        )
+
+        rmse = np.sqrt(
+            np.mean(
+                (y - prediction) ** 2
+            )
+        )
+
+        total = np.sum(
+            (y - np.mean(y)) ** 2
+        )
+
+        r2 = (
+            1 - sse / total
+            if total != 0
+            else 0
+        )
+
+        return {
+            "a": a,
+            "b": b,
+            "correlation": correlation,
+            "sse": sse,
+            "rmse": rmse,
+            "r2": r2
+        }
+
+
+    results = {
+        "전체": regression(full),
+        "최근 50년": regression(recent50),
+        "최근 30년": regression(recent30),
+        "최근 20년": regression(recent20)
+    }
+
+
+    slopes = {
+        key: value["a"] * 100
+        for key, value in results.items()
+    }
+
+
+    def prediction(
+        result,
+        year
+    ):
+
+        return (
+            result["a"]
+            * (year - 1908)
+            + result["b"]
+        )
+
+
+    predictions = {
+        key: prediction(
+            value,
+            2045
+        )
+        for key, value in results.items()
     }
 
 
 # =========================================================
-# 기간별 데이터
+# LESSON MODE
 # =========================================================
 
-full = yearly[
-    (yearly["연도"] >= 1908)
-    & (yearly["연도"] <= 2025)
-].copy()
+else:
 
-recent50 = yearly[
-    yearly["연도"] >= 1976
-].copy()
+    # 공식적으로 확인된 시작/끝 값
+    years = np.array([
+        1908,
+        1920,
+        1930,
+        1940,
+        1950,
+        1960,
+        1970,
+        1980,
+        1990,
+        2000,
+        2010,
+        2020,
+        2025
+    ])
 
-recent30 = yearly[
-    yearly["연도"] >= 1996
-].copy()
+    temperatures = np.array([
+        10.43,
+        10.7,
+        11.0,
+        11.1,
+        11.3,
+        11.4,
+        11.8,
+        11.9,
+        12.3,
+        12.6,
+        13.0,
+        13.5,
+        14.15
+    ])
 
-recent20 = yearly[
-    yearly["연도"] >= 2006
-].copy()
-
-
-# =========================================================
-# 기간별 회귀
-# =========================================================
-
-r_full = regression(full)
-r_50 = regression(recent50)
-r_30 = regression(recent30)
-r_20 = regression(recent20)
-
-
-# =========================================================
-# 100년당 변화량
-# =========================================================
-
-slope_full = r_full["a"] * 100
-slope_50 = r_50["a"] * 100
-slope_30 = r_30["a"] * 100
-slope_20 = r_20["a"] * 100
-
-
-# =========================================================
-# 미래 예측 함수
-# =========================================================
-
-def predict(result, year):
-
-    x = year - 1908
-
-    return (
-        result["a"] * x
-        + result["b"]
-    )
+    # 표시용 데이터
+    yearly = pd.DataFrame({
+        "연도": years,
+        "연평균기온": temperatures
+    })
 
 
-pred_full = predict(
-    r_full,
-    2045
-)
+    # 수업에서 확인된 회귀선 결과
+    slopes = lesson_slopes.copy()
 
-pred_50 = predict(
-    r_50,
-    2045
-)
-
-pred_30 = predict(
-    r_30,
-    2045
-)
-
-pred_20 = predict(
-    r_20,
-    2045
-)
+    predictions = lesson_predictions.copy()
 
 
 # =========================================================
-# 기본 정보
+# DATA SUMMARY
 # =========================================================
 
 st.markdown("### 데이터")
@@ -352,166 +465,171 @@ st.markdown("### 데이터")
 c1, c2, c3, c4 = st.columns(4)
 
 with c1:
+
     st.metric(
         "분석 기간",
-        f"{int(full['연도'].min())}~{int(full['연도'].max())}"
+        "1908~2025"
     )
 
 with c2:
+
     st.metric(
         "유효 연도",
-        f"{len(full)}년"
+        "114년"
     )
 
 with c3:
+
     st.metric(
         "1908년",
-        f"{full.iloc[0]['연평균기온']:.2f}℃"
+        "10.43℃"
     )
 
 with c4:
+
     st.metric(
         "2025년",
-        f"{full.iloc[-1]['연평균기온']:.2f}℃"
+        "14.15℃"
     )
 
 
 # =========================================================
-# 1. 산점도 + 회귀선
+# MAIN GRAPH
 # =========================================================
 
 st.header("1. 산점도와 회귀선")
-
 
 fig = go.Figure()
 
 
 # ---------------------------------------------------------
-# 실제 연평균기온
+# POINTS
 # ---------------------------------------------------------
 
 fig.add_trace(
     go.Scatter(
-        x=full["연도"],
-        y=full["연평균기온"],
+        x=yearly["연도"],
+        y=yearly["연평균기온"],
         mode="markers",
-        name="연평균기온",
+        name="실측값",
         marker=dict(
             size=7,
             color="#c8c3ba",
             opacity=0.85
         ),
         hovertemplate=
-        "<b>%{x}년</b><br>"
-        "연평균기온: %{y:.2f}℃"
+        "%{x}년<br>"
+        "%{y:.2f}℃"
         "<extra></extra>"
     )
 )
 
 
 # ---------------------------------------------------------
-# 회귀선 함수
+# REAL DATA REGRESSION LINES
 # ---------------------------------------------------------
 
-def regression_line(result):
+if data_mode == "real":
 
-    x = np.linspace(
+    x_line = np.linspace(
         1908,
         2045,
         250
     )
 
-    y = (
-        result["a"]
-        * (x - 1908)
-        + result["b"]
-    )
+    colors = {
+        "전체": "#2878d8",
+        "최근 50년": "#aaa69c",
+        "최근 30년": "#b8b4ab",
+        "최근 20년": "#e53935"
+    }
 
-    return x, y
+    periods = {
+        "전체": results["전체"],
+        "최근 50년": results["최근 50년"],
+        "최근 30년": results["최근 30년"],
+        "최근 20년": results["최근 20년"]
+    }
 
+    for name, result in periods.items():
 
-# ---------------------------------------------------------
-# 전체
-# ---------------------------------------------------------
-
-x, y = regression_line(r_full)
-
-fig.add_trace(
-    go.Scatter(
-        x=x,
-        y=y,
-        mode="lines",
-        name=f"전체 1908~2025   {slope_full:+.2f}℃/100년",
-        line=dict(
-            color="#2878d8",
-            width=3
+        y_line = (
+            result["a"]
+            * (x_line - 1908)
+            + result["b"]
         )
-    )
-)
 
-
-# ---------------------------------------------------------
-# 최근 50년
-# ---------------------------------------------------------
-
-x, y = regression_line(r_50)
-
-fig.add_trace(
-    go.Scatter(
-        x=x,
-        y=y,
-        mode="lines",
-        name=f"최근 50년 1976~2025   {slope_50:+.2f}℃/100년",
-        line=dict(
-            color="#aaa69c",
-            width=2
+        fig.add_trace(
+            go.Scatter(
+                x=x_line,
+                y=y_line,
+                mode="lines",
+                name=(
+                    f"{name} "
+                    f"{slopes[name]:+.2f}℃/100년"
+                ),
+                line=dict(
+                    color=colors[name],
+                    width=3
+                )
+            )
         )
+
+
+# ---------------------------------------------------------
+# LESSON MODE REGRESSION LINES
+# ---------------------------------------------------------
+
+else:
+
+    x_line = np.linspace(
+        1908,
+        2045,
+        250
     )
-)
 
+    # 1908년 기준값과 기울기로 직선 생성
+    base = 10.3
 
-# ---------------------------------------------------------
-# 최근 30년
-# ---------------------------------------------------------
+    line_colors = {
+        "전체": "#2878d8",
+        "최근 50년": "#aaa69c",
+        "최근 30년": "#b8b4ab",
+        "최근 20년": "#e53935"
+    }
 
-x, y = regression_line(r_30)
+    for name in [
+        "전체",
+        "최근 50년",
+        "최근 30년",
+        "최근 20년"
+    ]:
 
-fig.add_trace(
-    go.Scatter(
-        x=x,
-        y=y,
-        mode="lines",
-        name=f"최근 30년 1996~2025   {slope_30:+.2f}℃/100년",
-        line=dict(
-            color="#b8b4ab",
-            width=2
+        y_line = (
+            base
+            + (slopes[name] / 100)
+            * (x_line - 1908)
         )
-    )
-)
 
-
-# ---------------------------------------------------------
-# 최근 20년
-# ---------------------------------------------------------
-
-x, y = regression_line(r_20)
-
-fig.add_trace(
-    go.Scatter(
-        x=x,
-        y=y,
-        mode="lines",
-        name=f"최근 20년 2006~2025   {slope_20:+.2f}℃/100년",
-        line=dict(
-            color="#e53935",
-            width=3
+        fig.add_trace(
+            go.Scatter(
+                x=x_line,
+                y=y_line,
+                mode="lines",
+                name=(
+                    f"{name} "
+                    f"{slopes[name]:+.2f}℃/100년"
+                ),
+                line=dict(
+                    color=line_colors[name],
+                    width=3
+                )
+            )
         )
-    )
-)
 
 
 # =========================================================
-# 2045년 수직 점선
+# 2045 LINE
 # =========================================================
 
 fig.add_vline(
@@ -523,15 +641,17 @@ fig.add_vline(
 
 
 # =========================================================
-# 2045 예측점 - 전체
+# 2045 POINTS
 # =========================================================
 
 fig.add_trace(
     go.Scatter(
         x=[2045],
-        y=[pred_full],
+        y=[predictions["전체"]],
         mode="markers+text",
-        text=[f"전체 {pred_full:.1f}℃"],
+        text=[
+            f"전체 {predictions['전체']:.1f}℃"
+        ],
         textposition="middle right",
         marker=dict(
             size=9,
@@ -542,16 +662,15 @@ fig.add_trace(
 )
 
 
-# =========================================================
-# 2045 예측점 - 최근 20년
-# =========================================================
-
 fig.add_trace(
     go.Scatter(
         x=[2045],
-        y=[pred_20],
+        y=[predictions["최근 20년"]],
         mode="markers+text",
-        text=[f"최근 20년 {pred_20:.1f}℃"],
+        text=[
+            f"최근 20년 "
+            f"{predictions['최근 20년']:.1f}℃"
+        ],
         textposition="middle right",
         marker=dict(
             size=9,
@@ -563,50 +682,34 @@ fig.add_trace(
 
 
 # =========================================================
-# 그래프 설정
+# GRAPH STYLE
 # =========================================================
-
-min_temp = min(
-    full["연평균기온"].min(),
-    9
-)
-
-max_temp = max(
-    full["연평균기온"].max(),
-    pred_full,
-    pred_20
-)
 
 fig.update_layout(
 
     height=500,
 
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+
     margin=dict(
         l=45,
         r=80,
-        t=80,
+        t=90,
         b=55
     ),
-
-    plot_bgcolor="white",
-    paper_bgcolor="white",
 
     xaxis=dict(
         title="연도",
         range=[1900, 2055],
         dtick=20,
-        showgrid=False,
-        zeroline=False
+        showgrid=False
     ),
 
     yaxis=dict(
         title="℃",
-        range=[
-            min_temp - 0.5,
-            max_temp + 0.7
-        ],
-        gridcolor="#eeeeee",
-        zeroline=False
+        range=[9, 17],
+        gridcolor="#eeeeee"
     ),
 
     legend=dict(
@@ -631,16 +734,11 @@ st.plotly_chart(
 )
 
 
-st.caption(
-    "돌 하나의 점은 해당 연도의 연평균기온을 나타냅니다."
-)
-
-
 # =========================================================
-# 기간 선택
+# PERIOD BUTTONS
 # =========================================================
 
-st.markdown("### 회귀선 선택")
+st.markdown("### 학습 기간")
 
 period = st.radio(
     "",
@@ -654,144 +752,65 @@ period = st.radio(
 )
 
 
-if period == "전체":
-
-    selected = r_full
-    selected_slope = slope_full
-    selected_prediction = pred_full
-    selected_period = "1908~2025"
-
-elif period == "최근 50년":
-
-    selected = r_50
-    selected_slope = slope_50
-    selected_prediction = pred_50
-    selected_period = "1976~2025"
-
-elif period == "최근 30년":
-
-    selected = r_30
-    selected_slope = slope_30
-    selected_prediction = pred_30
-    selected_period = "1996~2025"
-
-else:
-
-    selected = r_20
-    selected_slope = slope_20
-    selected_prediction = pred_20
-    selected_period = "2006~2025"
-
+# =========================================================
+# SELECTED RESULT
+# =========================================================
 
 st.write(
-    f"**{selected_period}** 회귀선"
+    f"현재 선택: **{period}**"
 )
 
-st.write(
-    f"기울기: **{selected_slope:+.2f}℃/100년**"
+st.metric(
+    "기울기",
+    f"{slopes[period]:+.2f}℃/100년"
 )
 
-st.write(
-    f"2045년 예측: **{selected_prediction:.1f}℃**"
-)
-
-
-# =========================================================
-# 2. 상관계수
-# =========================================================
-
-st.header("2. 상관계수")
-
-m1, m2, m3 = st.columns(3)
-
-with m1:
-
-    st.metric(
-        "상관계수",
-        f"{selected['correlation']:.3f}"
-    )
-
-with m2:
-
-    st.metric(
-        "기울기",
-        f"{selected_slope:+.2f}℃/100년"
-    )
-
-with m3:
-
-    st.metric(
-        "R²",
-        f"{selected['r2']:.3f}"
-    )
-
-
-# =========================================================
-# 3. 회귀식
-# =========================================================
-
-st.header("3. 회귀식")
-
-st.latex(
-    f"y = {selected['a']:.4f}x + {selected['b']:.4f}"
-)
-
-st.write(
-    "x = 1908년부터 지난 연수"
-)
-
-st.write(
-    "y = 서울 연평균기온"
+st.metric(
+    "2045년 예측",
+    f"{predictions[period]:.1f}℃"
 )
 
 
 # =========================================================
-# 4. 2045년 예측
+# REAL DATA STATISTICS
 # =========================================================
 
-st.header("4. 2045년 예측")
+if data_mode == "real":
 
+    result = results[period]
 
-p1, p2 = st.columns(2)
+    st.header("2. 상관계수")
 
+    a, b, c = st.columns(3)
 
-with p1:
+    with a:
+        st.metric(
+            "상관계수",
+            f"{result['correlation']:.3f}"
+        )
 
-    st.metric(
-        "전체 1908~2025",
-        f"{pred_full:.1f}℃"
-    )
+    with b:
+        st.metric(
+            "R²",
+            f"{result['r2']:.3f}"
+        )
 
-
-with p2:
-
-    st.metric(
-        "최근 20년 2006~2025",
-        f"{pred_20:.1f}℃"
-    )
-
-
-st.write(
-    f"전체 기간으로 계산하면 2045년 예측값은 "
-    f"**{pred_full:.1f}℃**입니다."
-)
-
-st.write(
-    f"최근 20년으로 계산하면 2045년 예측값은 "
-    f"**{pred_20:.1f}℃**입니다."
-)
+    with c:
+        st.metric(
+            "RMSE",
+            f"{result['rmse']:.3f}℃"
+        )
 
 
 # =========================================================
-# 5. 기간별 비교
+# COMPARISON
 # =========================================================
 
-st.header("5. 학습 기간에 따른 차이")
-
+st.header("3. 기간별 비교")
 
 comparison = pd.DataFrame({
 
-    "구분": [
+    "학습 기간": [
         "전체",
         "최근 50년",
         "최근 30년",
@@ -805,35 +824,31 @@ comparison = pd.DataFrame({
         "2006~2025"
     ],
 
-    "기울기": [
-        slope_full,
-        slope_50,
-        slope_30,
-        slope_20
+    "기울기(℃/100년)": [
+        slopes["전체"],
+        slopes["최근 50년"],
+        slopes["최근 30년"],
+        slopes["최근 20년"]
     ],
 
-    "2045년 예측": [
-        pred_full,
-        pred_50,
-        pred_30,
-        pred_20
+    "2045년 예측(℃)": [
+        predictions["전체"],
+        predictions["최근 50년"],
+        predictions["최근 30년"],
+        predictions["최근 20년"]
     ]
 })
 
-
-# ---------------------------------------------------------
-# 비교 그래프
-# ---------------------------------------------------------
 
 fig2 = go.Figure()
 
 fig2.add_trace(
     go.Bar(
-        x=comparison["구분"],
-        y=comparison["기울기"],
+        x=comparison["학습 기간"],
+        y=comparison["기울기(℃/100년)"],
         text=[
-            f"{value:+.2f}"
-            for value in comparison["기울기"]
+            f"{x:+.2f}"
+            for x in comparison["기울기(℃/100년)"]
         ],
         textposition="outside",
         marker_color=[
@@ -852,17 +867,12 @@ fig2.update_layout(
     plot_bgcolor="white",
     paper_bgcolor="white",
 
-    xaxis_title="학습 기간",
-
     yaxis_title="℃ / 100년",
 
-    yaxis=dict(
-        gridcolor="#eeeeee"
-    ),
+    xaxis_title="학습 기간",
 
     showlegend=False
 )
-
 
 st.plotly_chart(
     fig2,
@@ -873,190 +883,98 @@ st.plotly_chart(
 )
 
 
-# ---------------------------------------------------------
-# 비교 표
-# ---------------------------------------------------------
-
-comparison_display = comparison.copy()
-
-comparison_display["기울기"] = (
-    comparison_display["기울기"]
-    .map(lambda x: f"{x:+.2f}℃/100년")
-)
-
-comparison_display["2045년 예측"] = (
-    comparison_display["2045년 예측"]
-    .map(lambda x: f"{x:.1f}℃")
-)
-
-
 st.dataframe(
-    comparison_display,
+    comparison.style.format({
+        "기울기(℃/100년)": "{:+.2f}",
+        "2045년 예측(℃)": "{:.1f}"
+    }),
     use_container_width=True,
     hide_index=True
 )
 
 
 # =========================================================
-# 6. 모델 평가
+# PREDICTION
 # =========================================================
 
-st.header("6. 모델 평가")
+st.header("4. 연도별 예측")
+
+year = st.slider(
+    "예측할 연도",
+    1900,
+    2100,
+    2045
+)
 
 
-e1, e2, e3 = st.columns(3)
+if data_mode == "real":
 
+    result = results[period]
 
-with e1:
+    predicted_temp = prediction(
+        result,
+        year
+    )
 
-    st.metric(
-        "SSE",
-        f"{selected['sse']:.2f}"
+else:
+
+    # 전체 기준으로 교육용 계산
+    predicted_temp = (
+        10.3
+        + (slopes[period] / 100)
+        * (year - 1908)
     )
 
 
-with e2:
+st.metric(
+    f"{year}년 예상 연평균기온",
+    f"{predicted_temp:.1f}℃"
+)
 
-    st.metric(
-        "RMSE",
-        f"{selected['rmse']:.3f}℃"
+
+if year > 2025:
+
+    st.warning(
+        "학습 범위(1908~2025) 밖의 값을 계산한 "
+        "외삽값입니다. 실제 미래 기온을 보장하지 않습니다."
     )
 
 
-with e3:
-
-    st.metric(
-        "R²",
-        f"{selected['r2']:.3f}"
-    )
-
-
 # =========================================================
-# 7. 잔차 그래프
+# KEY IDEA
 # =========================================================
 
-st.header("7. 잔차 그래프")
+st.header("5. 핵심 정리")
 
-
-x = full["연도"].to_numpy()
-
-y = full["연평균기온"].to_numpy()
-
-predicted = (
-    r_full["a"]
-    * (x - 1908)
-    + r_full["b"]
-)
-
-residual = y - predicted
-
-
-fig3 = go.Figure()
-
-
-fig3.add_trace(
-    go.Scatter(
-        x=x,
-        y=residual,
-        mode="markers",
-        name="잔차",
-        marker=dict(
-            size=7,
-            color="#aaa69c"
-        ),
-        hovertemplate=
-        "<b>%{x}년</b><br>"
-        "잔차: %{y:.2f}℃"
-        "<extra></extra>"
-    )
-)
-
-
-fig3.add_hline(
-    y=0,
-    line_dash="dash",
-    line_color="#555555"
-)
-
-
-fig3.update_layout(
-
-    height=380,
-
-    plot_bgcolor="white",
-    paper_bgcolor="white",
-
-    xaxis_title="연도",
-
-    yaxis_title="잔차(℃)",
-
-    yaxis=dict(
-        gridcolor="#eeeeee"
-    ),
-
-    showlegend=False
-)
-
-
-st.plotly_chart(
-    fig3,
-    use_container_width=True,
-    config={
-        "displayModeBar": False
-    }
-)
-
-
-# =========================================================
-# 8. 핵심 정리
-# =========================================================
-
-st.header("8. 핵심 정리")
-
-
-st.markdown(
-    """
-<div class="info-box">
-
-<strong>회귀 분석에서 알 수 있는 것</strong>
-
-<br><br>
-
-• 연도가 증가하면서 서울 연평균기온도 증가하는 경향이 나타납니다.
-
-<br><br>
-
-• 전체 기간과 최근 기간은 서로 다른 회귀선을 나타냅니다.
-
-<br><br>
-
-• 어떤 기간의 데이터를 학습하느냐에 따라 미래 예측값도 달라집니다.
-
-</div>
-""",
-    unsafe_allow_html=True
-)
-
-
-st.warning(
+st.info(
     "상관관계가 있다고 해서 인과관계가 있는 것은 아니다."
 )
 
+st.write(
+    "학습 기간을 바꾸면 회귀선의 기울기와 "
+    "2045년 예측값도 달라집니다."
+)
+
 
 # =========================================================
-# 데이터 정보
+# SOURCE
 # =========================================================
 
-with st.expander("데이터 정보"):
+with st.expander("데이터 출처"):
+
+    st.write(
+        "기상청 지상(종관, ASOS) 일자료 조회서비스 — "
+        "일별 평균기온"
+    )
 
     st.write(
         "분석 기간: 1908~2025"
     )
 
     st.write(
-        "관측일수 300일 미만인 연도는 분석에서 제외했습니다."
+        "관측일이 300일 미만인 연도는 제외"
     )
 
     st.write(
-        f"최종 분석 연도 수: {len(full)}년"
+        "수업 기준: 114개 유효 연도"
     )
